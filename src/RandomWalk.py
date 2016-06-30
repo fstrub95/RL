@@ -1,8 +1,9 @@
 import numpy as np
 import random
-from enum import Enum
+
 from collections import namedtuple
 from scipy.linalg import solve
+
 
 Step = namedtuple('Step', ['state', 'action', 'reward', 'next_state'], verbose=True)
 Model = namedtuple('Model', ['kernel', 'reward', 'terminal_state'], verbose=True)
@@ -102,8 +103,7 @@ class DP:
         # Solve the Bellman linear system
         A = np.identity(self.Ns) - gamma * pi_kernel
         b = pi_reward
-        v = solve(A,b)
-        #v = np.linalg.inv(A).dot(b)  # TODO: use solver
+        v = solve(A, b)
 
         return v
 
@@ -124,17 +124,64 @@ class DP:
 
         return v
 
+    def value_to_q_function(self, gamma, v):
+        Q = np.copy(self.reward)
+        for i, q in enumerate(Q):
+            q += gamma*self.kernel[i].dot(v)
+        return Q
+
     def q_function(self, gamma, policy, epsilon=1e-4, v0=None):
 
         # Compute V values
         v = self.value_function_fix_point(gamma, policy, epsilon=epsilon, v0=v0)
 
         # Compute Q
-        Q = np.copy(self.reward)
-        for i, q in enumerate(Q):
-            q += gamma*self.kernel[i].dot(v)
+        Q = self.value_to_q_function(gamma, v)
 
-        return Q
+        return Q, v
+
+    def get_greedy_policy(self, Q):
+        policy = np.zeros((self.Ns, self.Na))
+        greedy_indices = np.argmax(Q, axis=1)
+
+        for i, state_policy in zip(greedy_indices, policy):
+            state_policy[i] = 1
+        return policy
+
+    def policy_iteration(self, gamma, epsilon=1e-4, v0=None):
+
+        # Initialization
+        Q = np.random.uniform(size=(self.Ns, self.Na))
+        v = v0
+        policy0 = self.get_greedy_policy(Q)
+        policy, old_policy = policy0, policy0
+
+        # Policy Iteration
+        while True:
+            Q, v = self.q_function(gamma, policy, epsilon=epsilon, v0=v)
+            policy, old_policy = self.get_greedy_policy(Q), policy
+
+            if np.array_equal(policy, old_policy):
+                break
+
+        return policy, Q, v
+
+    def value_iteration(self, gamma, epsilon=1e-4, v0=None):
+
+        # Initialization
+        if v0 is None:
+            v0 = np.zeros(self.Ns)
+        v = v0
+        v_old = v + 10 * epsilon
+
+        # Bellman optimal
+        while np.max(np.abs(v - v_old)) > epsilon:
+            v, v_old = np.max(self.reward + gamma * self.kernel.dot(v), axis=1), v
+
+        Q = self.value_to_q_function(gamma, v)
+        policy = self.get_greedy_policy(Q)
+
+        return policy, Q, v
 
 
 if __name__ == "__main__":
@@ -160,3 +207,13 @@ if __name__ == "__main__":
     print(v1)
     print(v2)
     print(q1)
+
+    pi3, q3, v3 = dp_solver.policy_iteration(gamma=0.99)
+    print(pi3)
+    print(q3)
+    print(v3)
+
+    pi4, q4, v4 = dp_solver.value_iteration(gamma=0.99)
+    print(pi4)
+    print(q4)
+    print(v4)
