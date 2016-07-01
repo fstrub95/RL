@@ -40,7 +40,7 @@ class RandomWalk:
         return Model(kernel=self.kernel, reward=self.reward, terminal_state=self.terminal_state)
 
 
-class Sampler:
+class ModelSampler:
     def __init__(self, model):
         self.kernel = model.kernel
         self.reward = model.reward
@@ -50,32 +50,72 @@ class Sampler:
 
         [self.Ns, self.Na] = self.reward.shape
 
-    def get_next(self, state, policy):
-        action = np.random.choice(self.Na, 1, p=policy[state])[0]
+    def get_space(self):
+        return self.Ns, self.Na
+
+    def get_next(self, state, action):
+
         reward = self.reward[state, action]
         next_state = np.random.choice(self.Ns, 1, p=self.kernel[state, action])[0]
 
         return Step(state=state, action=action, reward=reward, next_state=next_state)
 
-    def get_episode(self, policy, start=None):
+    def __get_episode(self, state0, policy, episode = []):
 
-        if start is None:
-            start = random.randint(0, self.Ns-1)
-
-        state = start
-        episode = []
+        state = state0
         while state not in self.terminal_state:
-            step = self.get_next(state, policy=policy)
+            # pick action regarding policy
+            action = np.random.choice(self.Na, 1, p=policy[state])[0]
+
+            step = self.get_next(state=state, action=action)
             episode.append(step)
             state = step.next_state
 
         return episode
 
-    def get_batch(self, size, policy, start=None):
-        return [self.get_episode(policy=policy, start=start) for _ in range(size)]
+    def get_v_episode(self, policy, state0=None):
+
+        # pick a random state/action
+        if state0 is None:
+            state0 = random.randint(0, self.Ns - 1)
+
+        # compute the episode by following the policy
+        return self.__get_episode(policy=policy, state0=state0)
+
+    def get_v_batch(self, size, policy, state0=None):
+        return [self.get_v_episode(policy=policy, state0=state0) for _ in range(size)]
+
+    def get_q_episode(self, policy, state0=None, action0=None):
+
+        # pick a random state/action
+        if state0 is None:
+            state0 = random.randint(0, self.Ns-1)
+        if action0 is None:
+            action0 = random.randint(0, self.Na-1)
+
+        # evaluate the first state/action
+        step = self.get_next(state=state0, action=action0)
+        episode = [step]
+
+        # compute the episode by following the policy
+        return self.__get_episode(state0=step.next_state, policy=policy, episode=episode)
+
+    def get_q_batch(self, size, policy, state0=None, action0=None):
+        return [self.get_q_episode(policy=policy, state0=state0, action0=action0) for _ in range(size)]
 
 
-class DP:
+
+class Solver:
+    def get_greedy_policy(self, Q):
+        policy = np.zeros((self.Ns, self.Na))
+        greedy_indices = np.argmax(Q, axis=1)
+
+        for i, state_policy in zip(greedy_indices, policy):
+            state_policy[i] = 1
+        return policy
+
+
+class DP(Solver):
     def __init__(self, model):
         self.kernel = model.kernel
         self.reward = model.reward
@@ -140,14 +180,6 @@ class DP:
 
         return Q, v
 
-    def get_greedy_policy(self, Q):
-        policy = np.zeros((self.Ns, self.Na))
-        greedy_indices = np.argmax(Q, axis=1)
-
-        for i, state_policy in zip(greedy_indices, policy):
-            state_policy[i] = 1
-        return policy
-
     def policy_iteration(self, gamma, epsilon=1e-4, v0=None):
 
         # Initialization
@@ -184,6 +216,91 @@ class DP:
         return policy, Q, v
 
 
+
+class MC(Solver):
+    def __init__(self, sampler):
+        self.sampler = sampler
+        self.Ns, self.Na = sampler.get_space()
+
+
+
+    # every-visit MC
+    def value_function(self, gamma, policy, no_samples=1000, state0=None, v0=None):
+
+        if v0 is None:
+            v0 = np.zeros(self.Ns)
+        v = v0
+        state_counter = np.zeros(self.Ns)
+
+        for _ in range(no_samples):
+
+            episode = self.sampler.get_v_episode(policy=policy, state0=state0)
+            cum_returns = 0
+
+            for step in reversed(episode):
+
+                #compute the cumulative return
+                cum_returns = step.reward + gamma*cum_returns
+
+                #iterative Mean to compute expected rewards
+                state_counter[step.state] += 1
+                n = state_counter[step.state]
+                v[step.state] = (n-1) / n * v[step.state] + cum_returns/n
+
+        return v
+
+
+    def __update_q_function(self, episode, gamma, q, state_counter):
+
+        cum_returns = 0
+
+        for step in reversed(episode):
+            # compute the cumulative return
+            cum_returns = step.reward + gamma * cum_returns
+
+            # iterative Mean to compute expected rewards
+            state_counter[step.state, step.action] += 1
+            n = state_counter[step.state, step.action]
+            q[step.state, step.action] = (n - 1) / n * q[step.state, step.action] + cum_returns / n
+
+        return q
+
+
+    # every-visit MC
+    def q_function(self, gamma, policy, no_samples=1000, q0=None, state0=None, action0=None):
+
+        # Intialization
+        if q0 is None:
+            q0 = np.zeros((self.Ns, self.Na))
+        q = q0
+        state_counter = np.zeros((self.Ns, self.Na))
+
+        #MC carlo evaluation
+        for _ in range(no_samples):
+            episode = self.sampler.get_q_episode(policy=policy, state0=state0, action0=action0)
+            q = self.__update_q_function(episode, gamma, q, state_counter)
+
+        return q
+
+
+    def q_control(self, gamma, policy, no_samples=1000, q0=None):
+
+        if q0 is None:
+            q0 = np.zeros((self.Ns, self.Na))
+        q = q0
+        state_counter = np.zeros((self.Ns, self.Na))
+
+        #MC carlo control
+        for _ in range(no_samples):
+            episode = self.sampler.get_q_episode(policy=policy)
+            q = self.__update_q_function(episode, gamma, q, state_counter)
+            policy = self.get_greedy_policy(q)
+
+        return policy, q
+
+
+
+
 if __name__ == "__main__":
 
     Ns = 5
@@ -191,8 +308,8 @@ if __name__ == "__main__":
     random_walk = RandomWalk(Ns)
     model = random_walk.get_model()
 
-    sampler = Sampler(model)
-    batch = sampler.get_batch(5, policy=random_walk.get_random_policy(), start=random_walk.start())
+    sampler = ModelSampler(model)
+    batch = sampler.get_v_batch(5, policy=random_walk.get_random_policy(), state0=random_walk.start())
 
     for episode in batch:
         print(episode)
@@ -200,20 +317,34 @@ if __name__ == "__main__":
 
     dp_solver = DP(model)
 
-    v1 = dp_solver.value_function_fix_point(gamma=0.99, policy=random_walk.get_random_policy())
+    #v1 = dp_solver.value_function_fix_point(gamma=0.99, policy=random_walk.get_random_policy())
     v2 = dp_solver.value_function_linear_solve(gamma=0.99, policy=random_walk.get_random_policy())
     q1 = dp_solver.q_function(gamma=0.99, policy=random_walk.get_random_policy())
 
-    print(v1)
-    print(v2)
-    print(q1)
+    #print(v1)
+    #print(v2)
+    #print(q1)
 
     pi3, q3, v3 = dp_solver.policy_iteration(gamma=0.99)
     print(pi3)
     print(q3)
-    print(v3)
+    #print(v3)
 
-    pi4, q4, v4 = dp_solver.value_iteration(gamma=0.99)
-    print(pi4)
-    print(q4)
-    print(v4)
+    #pi4, q4, v4 = dp_solver.value_iteration(gamma=0.99)
+    #print(pi4)
+    #print(q4)
+    #print(v4)
+
+    mc_solver = MC(sampler)
+    vv1 = mc_solver.value_function(gamma=0.99, no_samples=1000, state0=random_walk.start(), policy=random_walk.get_random_policy())
+    qq1 = mc_solver.q_function(gamma=0.99, no_samples=1000, policy=random_walk.get_random_policy())
+
+    print(vv1)
+    print(qq1)
+
+
+    ppi3, qq3 = mc_solver.q_control(gamma=0.99, policy=random_walk.get_random_policy(), no_samples=10000)
+
+    print(qq3)
+    print(ppi3)
+
