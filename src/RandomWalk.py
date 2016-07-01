@@ -106,12 +106,24 @@ class ModelSampler:
 
 
 class Solver:
+
     def get_greedy_policy(self, Q):
         policy = np.zeros((self.Ns, self.Na))
         greedy_indices = np.argmax(Q, axis=1)
 
         for i, state_policy in zip(greedy_indices, policy):
             state_policy[i] = 1
+        return policy
+
+    def get_epsilon_greedy_policy(self, Q, epsilon=0.1):
+
+        policy = np.zeros((self.Ns, self.Na))
+        policy.fill(epsilon/self.Na)
+
+        greedy_indices = np.argmax(Q, axis=1)
+
+        for i, state_policy in zip(greedy_indices, policy):
+            state_policy[i] += (1-epsilon)
         return policy
 
 
@@ -283,7 +295,7 @@ class MC(Solver):
         return q
 
 
-    def q_control(self, gamma, policy, no_samples=1000, q0=None):
+    def q_control_on_policy(self, gamma, policy, no_samples=1000, epsilon=0.1, q0=None):
 
         if q0 is None:
             q0 = np.zeros((self.Ns, self.Na))
@@ -294,7 +306,10 @@ class MC(Solver):
         for _ in range(no_samples):
             episode = self.sampler.get_q_episode(policy=policy)
             q = self.__update_q_function(episode, gamma, q, state_counter)
-            policy = self.get_greedy_policy(q)
+            policy = self.get_epsilon_greedy_policy(Q=q, epsilon=epsilon)
+
+        # Compute a final greedy policy
+        policy = self.get_greedy_policy(q)
 
         return policy, q
 
@@ -336,14 +351,14 @@ if __name__ == "__main__":
     #print(v4)
 
     mc_solver = MC(sampler)
-    vv1 = mc_solver.value_function(gamma=0.99, no_samples=1000, state0=random_walk.start(), policy=random_walk.get_random_policy())
-    qq1 = mc_solver.q_function(gamma=0.99, no_samples=1000, policy=random_walk.get_random_policy())
+    #vv1 = mc_solver.value_function(gamma=0.99, no_samples=1000, state0=random_walk.start(), policy=random_walk.get_random_policy())
+    #qq1 = mc_solver.q_function(gamma=0.99, no_samples=1000, policy=random_walk.get_random_policy())
 
-    print(vv1)
-    print(qq1)
+    #print(vv1)
+    #print(qq1)
 
 
-    ppi3, qq3 = mc_solver.q_control(gamma=0.99, policy=random_walk.get_random_policy(), no_samples=10000)
+    ppi3, qq3 = mc_solver.q_control_on_policy(gamma=0.99, policy=random_walk.get_random_policy(), no_samples=1000)
 
     print(qq3)
     print(ppi3)
