@@ -60,16 +60,21 @@ class ModelSampler:
 
         return Step(state=state, action=action, reward=reward, next_state=next_state)
 
-    def __get_episode(self, state0, policy, episode = []):
+    def __get_episode(self, state0, policy, episode, extra_step=False):
 
         state = state0
-        while state not in self.terminal_state:
+        while state not in self.terminal_state :
             # pick action regarding policy
             action = np.random.choice(self.Na, 1, p=policy[state])[0]
-
             step = self.get_next(state=state, action=action)
+
             episode.append(step)
             state = step.next_state
+
+        if extra_step:
+            action = np.random.choice(self.Na, 1, p=policy[state])[0]
+            step = self.get_next(state=state, action=action)
+            episode.append(step)
 
         return episode
 
@@ -80,12 +85,12 @@ class ModelSampler:
             state0 = random.randint(0, self.Ns - 1)
 
         # compute the episode by following the policy
-        return self.__get_episode(policy=policy, state0=state0)
+        return self.__get_episode(policy=policy, state0=state0, episode=[])
 
     def get_v_batch(self, size, policy, state0=None):
         return [self.get_v_episode(policy=policy, state0=state0) for _ in range(size)]
 
-    def get_q_episode(self, policy, state0=None, action0=None):
+    def get_q_episode(self, policy, state0=None, action0=None, extra_step=False):
 
         # pick a random state/action
         if state0 is None:
@@ -95,10 +100,9 @@ class ModelSampler:
 
         # evaluate the first state/action
         step = self.get_next(state=state0, action=action0)
-        episode = [step]
 
         # compute the episode by following the policy
-        return self.__get_episode(state0=step.next_state, policy=policy, episode=episode)
+        return self.__get_episode(state0=step.next_state, policy=policy, episode=[step], extra_step=extra_step)
 
     def get_q_batch(self, size, policy, state0=None, action0=None):
         return [self.get_q_episode(policy=policy, state0=state0, action0=action0) for _ in range(size)]
@@ -262,6 +266,37 @@ class MC(Solver):
         return v
 
 
+    def value_function_grad(self, gamma, policy, no_samples=1000, state0=None, v0=None, alpha=0):
+
+        if v0 is None:
+            v0 = np.zeros(self.Ns)
+        v = v0
+        state_counter = np.zeros(self.Ns)
+
+        for _ in range(no_samples):
+
+            episode = self.sampler.get_v_episode(policy=policy, state0=state0)
+            cum_returns = 0
+
+            for step in reversed(episode):
+                # compute the cumulative return
+                cum_returns = step.reward + gamma * cum_returns
+
+                #compute the number of states
+                state_counter[step.state] += 1
+                n = state_counter[step.state]
+
+                # either use fix/dynamic gradient step (learning rate=lrt)
+                if alpha > 0: lrt = alpha
+                else : lrt = 1/n
+
+                #update v
+                v[step.state] +=  lrt * ( cum_returns - v[step.state] )
+
+        return v
+
+
+
     def __update_q_function(self, episode, gamma, q, state_counter):
 
         cum_returns = 0
@@ -316,6 +351,152 @@ class MC(Solver):
 
 
 
+class TD_Backward(Solver):
+    def __init__(self, sampler, _lambda=0):
+        self.sampler = sampler
+        self._lambda = _lambda
+        self.Ns, self.Na = sampler.get_space()
+
+    def value_function(self, gamma, policy, no_samples=1000, state0=None, v0=None, alpha=0.1):
+        if v0 is None:
+            v0 = np.zeros(self.Ns)
+        v = v0
+
+
+        for _ in range(no_samples):
+
+            episode = self.sampler.get_v_episode(policy=policy, state0=state0)
+            etrace = np.zeros(self.Ns)
+
+            # Approximate the value function
+            for step in episode:
+
+                #compute the error for one state
+                td_error = step.reward + gamma*v[step.next_state] - v[step.state]
+                etrace[step.state] += 1
+
+                #update v and the eligibility trace for all the states
+                v += alpha*td_error*etrace
+                etrace *= gamma*self._lambda
+
+        return v
+
+
+    def sarsa(self, gamma, policy, no_samples=1000, alpha=0.1, q0=None, state0=None, action0=None):
+
+        if q0 is None:
+            q0 = np.zeros((self.Ns, self.Na))
+        q = q0
+
+
+        for _ in range(no_samples):
+
+            episode = self.sampler.get_q_episode(policy=policy, state0=None, action0=None, extra_step=True)
+            etrace = np.zeros((self.Ns, self.Na))
+
+            # Approximate the value function
+            for step, next_step in zip(episode[:-1], episode[1:]):
+                # compute the error for one state
+                td_error = step.reward + gamma * q[next_step.state, next_step.action] - q[step.state, step.action]
+                etrace[step.state, step.action] += 1
+
+                # update v and the eligibility trace for all the states
+                q += alpha * td_error * etrace
+                etrace *= gamma * self._lambda
+
+            policy = self.get_epsilon_greedy_policy(q)
+
+        policy = self.get_greedy_policy(q)
+
+        return policy, q
+
+
+    def q_learning(self, gamma, policy, no_samples=1000, alpha=0.1, q0=None, state0=None, action0=None):
+        if q0 is None:
+            q0 = np.zeros((self.Ns, self.Na))
+        q = q0
+
+        for _ in range(no_samples):
+
+            episode = self.sampler.get_q_episode(policy=policy, state0=None, action0=None, extra_step=True)
+            etrace = np.zeros((self.Ns, self.Na))
+
+            # Approximate the value function
+            for step, next_step in zip(episode[:-1], episode[1:]):
+
+                #get next greedy action (Q-Learning specific)
+                a_greedy = q[next_step.state].argmax()
+
+                # compute the error for one state
+                td_error = step.reward + gamma * q[next_step.state, a_greedy] - q[step.state, step.action]
+                etrace[step.state, step.action] += 1
+
+                # update v and the eligibility trace for all the states
+                q += alpha * td_error * etrace
+
+                if a_greedy == next_step.action:
+                    etrace *= gamma * self._lambda
+                else:
+                    etrace.fill(0)
+
+            policy = self.get_epsilon_greedy_policy(q)
+
+        policy = self.get_greedy_policy(q)
+
+        return policy, q
+
+
+class TD_Forward(Solver):
+    def __init__(self, sampler, _lambda=0):
+        self.sampler = sampler
+        self._lambda = _lambda
+        self.Ns, self.Na = sampler.get_space()
+
+    def __compute_gain(self, episode, gamma, v):
+
+        gain = np.zeros(len(episode))
+
+
+        # compute the gain with a T step horizon
+        gamma_prod = 1
+        cum_reward = 0
+        for i, step in enumerate(episode):
+            gamma_prod *= gamma
+            cum_reward += gamma_prod*step.reward
+
+            gain[i] = cum_reward + gamma*gamma_prod*v[step.next_state]
+
+        # compute the gain with a geometrical mean
+        gain_prev = 1
+        lambda_norm = 1-self._lambda
+        for i, g in reversed(list(enumerate(gain))):
+            gain_prev = g + self._lambda*gain_prev
+            gain[i] = lambda_norm * gain_prev
+
+        return gain
+
+    def value_function(self, gamma, policy, no_samples=1000, state0=None, v0=None, alpha=0.1):
+
+        if v0 is None:
+            v0 = np.zeros(self.Ns)
+        v = v0
+
+        for _ in range(no_samples):
+
+            episode = self.sampler.get_v_episode(policy=policy, state0=state0)
+            gain = self.__compute_gain(episode=episode, gamma=gamma, v=v)
+
+            # Approximate the value function
+            for step, cum_reward in zip(episode, gain):
+                v[step.state] += alpha*( cum_reward - v[step.state] )
+        return v
+
+
+
+
+
+
+
 if __name__ == "__main__":
 
     Ns = 5
@@ -333,8 +514,8 @@ if __name__ == "__main__":
     dp_solver = DP(model)
 
     #v1 = dp_solver.value_function_fix_point(gamma=0.99, policy=random_walk.get_random_policy())
-    v2 = dp_solver.value_function_linear_solve(gamma=0.99, policy=random_walk.get_random_policy())
-    q1 = dp_solver.q_function(gamma=0.99, policy=random_walk.get_random_policy())
+    #v2 = dp_solver.value_function_linear_solve(gamma=0.99, policy=random_walk.get_random_policy())
+    #q1 = dp_solver.q_function(gamma=0.99, policy=random_walk.get_random_policy())
 
     #print(v1)
     #print(v2)
@@ -350,16 +531,47 @@ if __name__ == "__main__":
     #print(q4)
     #print(v4)
 
-    mc_solver = MC(sampler)
+    #mc_solver = MC(sampler)
     #vv1 = mc_solver.value_function(gamma=0.99, no_samples=1000, state0=random_walk.start(), policy=random_walk.get_random_policy())
+    #vv1 = mc_solver.value_function_grad(gamma=0.99, no_samples=1000, state0=random_walk.start(), policy=random_walk.get_random_policy(), alpha=0.01)
     #qq1 = mc_solver.q_function(gamma=0.99, no_samples=1000, policy=random_walk.get_random_policy())
 
     #print(vv1)
     #print(qq1)
 
 
-    ppi3, qq3 = mc_solver.q_control_on_policy(gamma=0.99, policy=random_walk.get_random_policy(), no_samples=1000)
+    #ppi3, qq3 = mc_solver.q_control_on_policy(gamma=0.99, policy=random_walk.get_random_policy(), no_samples=1000)
 
-    print(qq3)
-    print(ppi3)
+    #print(qq3)
+    #print(ppi3)
 
+
+    print("yo")
+
+    #td_solver = TD_Forward(sampler, _lambda=0)
+    #v4 = td_solver.value_function(gamma=0.99, state0=random_walk.start(), policy=random_walk.get_random_policy(), alpha=0.05)
+    #print(v4)
+
+    #td_f_solver = TD_Forward(sampler, _lambda=0.8)
+    #v5 = td_f_solver.value_function(gamma=0.99, state0=random_walk.start(), policy=random_walk.get_random_policy(),
+    #                                alpha=0.01, no_samples=1000)
+
+    #print(v5)
+
+    td_b_solver = TD_Backward(sampler, _lambda=0.9)
+    #v6 = td_b_solver.value_function(gamma=0.99, state0=random_walk.start(), policy=random_walk.get_random_policy(),
+    #                                alpha=0.1, no_samples=1000)
+
+    ppi6, qq6 = td_b_solver.sarsa(gamma=0.99, state0=random_walk.start(), policy=random_walk.get_random_policy(),
+                                    alpha=0.1, no_samples=1000)
+
+    #print(v6)
+    print(ppi6)
+    print(qq6)
+
+    ppi7, qq7 = td_b_solver.q_learning(gamma=0.99, state0=random_walk.start(), policy=random_walk.get_random_policy(),
+                                  alpha=0.1, no_samples=1000)
+
+    # print(v6)
+    print(ppi7)
+    print(qq7)
