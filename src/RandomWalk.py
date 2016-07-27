@@ -3,7 +3,7 @@ import random
 
 from collections import namedtuple
 from scipy.linalg import solve
-
+from scipy import signal
 
 Step = namedtuple('Step', ['state', 'action', 'reward', 'next_state'], verbose=True)
 Model = namedtuple('Model', ['kernel', 'reward', 'terminal_state'], verbose=True)
@@ -418,7 +418,7 @@ class TD_Backward(Solver):
 
         for _ in range(no_samples):
 
-            episode = self.sampler.get_q_episode(policy=policy, state0=None, action0=None, extra_step=True)
+            episode = self.sampler.get_q_episode(policy=policy, state0=state0, action0=action0, extra_step=True)
             etrace = np.zeros((self.Ns, self.Na))
 
             # Approximate the value function
@@ -494,6 +494,114 @@ class TD_Forward(Solver):
 
 
 
+class tabular_basis:
+    def __init__(self, _Ns, _Na):
+        self.Ns = _Ns
+        self.Na = _Na
+
+    def size(self):
+        return self.Ns*self.Na
+
+    def eval(self, state, action):
+        phi = np.zeros((self.Ns, self.Na))
+        phi[state, action] = 1
+        return phi.reshape(-1)
+
+class gaussian_basis:
+    def __init__(self, _Ns, _Na, no_gaussian, sigma):
+        self.Ns = _Ns
+        self.Na = _Na
+        self.mean = np.array([ i / (no_gaussian + 1) for i in range(_Ns) ])
+        self.sigma = sigma
+
+    def gaussian(self, x, mean, std):
+        return np.exp(-np.power(x - mean, 2.) / (2 * np.power(std, 2.)))
+
+    def size(self):
+        return self.Na * len(self.mean)
+
+    def eval(self, state, action):
+        phi = np.zeros((self.Na, len(self.mean)))
+        phi[action] = self.gaussian(state, self.mean, std=self.sigma)
+        return phi.reshape(-1)
+
+
+class soft_max_policy_1D:
+
+    def __init__(self, basis):
+        self.Ns = basis.Ns
+        self.Na = basis.Na
+        self.basis = basis
+        self.w = np.random.uniform(-0.5,0.5,size=basis.size())
+
+    def __linear_eval(self, state):
+        return [np.dot(self.w, self.basis.eval(state, action)) for action in range(self.Na)]
+
+    def __softmax(self, x):
+        e = np.exp(x)
+        dist = e / np.sum(e)
+        return dist
+
+    def eval(self, state, action=None):
+        linear_comb = self.__linear_eval(state)
+        soft_max = self.__softmax(linear_comb)
+
+        if action:
+            return soft_max[action]
+        else:
+            return soft_max
+
+    def log_grad(self, state, action):
+
+        phi = self.basis.eval(state, action)
+
+        E_phi = np.zeros(self.basis.size())
+
+        pi = self.eval(state)
+
+        for a in range(self.Na):
+            E_phi += (self.basis.eval(state, a)*pi[a])
+
+
+        return phi -  E_phi
+
+    def update(self, state, action, alpha, reward):
+        self.w += alpha * self.log_grad(state, action) * reward
+
+
+class REINFORCE(Solver):
+    def __init__(self, sampler, policy):
+        self.sampler = sampler
+        self.Ns, self.Na = sampler.get_space()
+        self.policy = policy
+
+    def __policy2tabular(self, approx_policy):
+
+        tabular_policy = np.zeros((self.Ns, self.Na))
+        for state in range(self.Ns):
+            tabular_policy[state] = approx_policy.eval(state=state, action=None)
+        return tabular_policy
+
+    def compute_pi(self, gamma, no_samples = 1000, alpha = 0.1, state0=None, action0=None, v0=None):
+
+        tabular_policy = self.__policy2tabular(self.policy)
+
+        for _ in range(no_samples):
+
+            episode = self.sampler.get_v_episode(policy=tabular_policy,state0=state0)
+
+            cum_returns = 0
+            for step in reversed(episode):
+
+                # compute the cumulative return
+                cum_returns = step.reward + gamma * cum_returns
+                self.policy.w += alpha*self.policy.log_grad(step.state, step.action)*cum_returns
+
+            tabular_policy = self.__policy2tabular(self.policy)
+
+        return tabular_policy
+
+
 
 
 
@@ -521,13 +629,13 @@ if __name__ == "__main__":
     #print(v2)
     #print(q1)
 
-    pi3, q3, v3 = dp_solver.policy_iteration(gamma=0.99)
-    print(pi3)
-    print(q3)
+    #pi3, q3, v3 = dp_solver.policy_iteration(gamma=0.99)
+    #print(pi3)
+    #print(q3)
     #print(v3)
 
-    #pi4, q4, v4 = dp_solver.value_iteration(gamma=0.99)
-    #print(pi4)
+    pi4, q4, v4 = dp_solver.value_iteration(gamma=0.99)
+    print(pi4)
     #print(q4)
     #print(v4)
 
@@ -538,6 +646,7 @@ if __name__ == "__main__":
 
     #print(vv1)
     #print(qq1)
+    #print(pi)
 
 
     #ppi3, qq3 = mc_solver.q_control_on_policy(gamma=0.99, policy=random_walk.get_random_policy(), no_samples=1000)
@@ -547,6 +656,15 @@ if __name__ == "__main__":
 
 
     print("yo")
+
+    reinforce = REINFORCE(sampler, soft_max_policy_1D(tabular_basis(Ns+2, 2)))
+    q = reinforce.compute_pi(gamma=0.99, no_samples=1000, state0=random_walk.start(), alpha=0.2)
+    print(q)
+
+
+    #reinforce = REINFORCE(sampler, soft_max_policy_1D(gaussian_basis(Ns + 2, 2, 3, 0.1)))
+    #q = reinforce.compute_pi(gamma=0.99, no_samples=1000, state0=random_walk.start(), alpha=0.05)
+    #print(q)
 
     #td_solver = TD_Forward(sampler, _lambda=0)
     #v4 = td_solver.value_function(gamma=0.99, state0=random_walk.start(), policy=random_walk.get_random_policy(), alpha=0.05)
@@ -558,20 +676,21 @@ if __name__ == "__main__":
 
     #print(v5)
 
-    td_b_solver = TD_Backward(sampler, _lambda=0.9)
+    #td_b_solver = TD_Backward(sampler, _lambda=0.9)
     #v6 = td_b_solver.value_function(gamma=0.99, state0=random_walk.start(), policy=random_walk.get_random_policy(),
     #                                alpha=0.1, no_samples=1000)
 
-    ppi6, qq6 = td_b_solver.sarsa(gamma=0.99, state0=random_walk.start(), policy=random_walk.get_random_policy(),
-                                    alpha=0.1, no_samples=1000)
+    #ppi6, qq6 = td_b_solver.sarsa(gamma=0.99, state0=random_walk.start(), policy=random_walk.get_random_policy(),
+    #                                alpha=0.1, no_samples=1000)
 
     #print(v6)
-    print(ppi6)
-    print(qq6)
+    #print(ppi6)
+    #print(qq6)
 
-    ppi7, qq7 = td_b_solver.q_learning(gamma=0.99, state0=random_walk.start(), policy=random_walk.get_random_policy(),
-                                  alpha=0.1, no_samples=1000)
+    #ppi7, qq7 = td_b_solver.q_learning(gamma=0.99, state0=random_walk.start(), policy=random_walk.get_random_policy(),
+    #                              alpha=0.1, no_samples=1000)
 
     # print(v6)
-    print(ppi7)
-    print(qq7)
+    #print(ppi7)
+    #print(qq7)
+
